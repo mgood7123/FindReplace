@@ -616,7 +616,8 @@ void help() {
     puts("");
     puts("");
     puts("[1] mode:");
-    puts("the following can be specified in any order, if any are given, command processing switches from [2] to [1]");
+    puts("the following can be specified in any order")
+    puts("  if any are given, command processing switches from [2] to [1]");
     puts("long option equivilants:");
     puts("  --file");
     puts("  --dir");

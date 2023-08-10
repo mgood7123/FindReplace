@@ -24,7 +24,8 @@ dir/file           REQUIRED: the directory/file to search
 
 
 [1] mode:
-the following can be specified in any order, if any are given, command processing switches from [2] to [1]
+the following can be specified in any order
+  if any are given, command processing switches from [2] to [1]
 long option equivilants:
   --file
   --dir
