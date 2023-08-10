@@ -42,32 +42,6 @@ long option equivilants:
       |
       |  CONSTRAINTS:
       |
-      |   the following are equivilant
-      |    \
-      |     |- FindReplace ... item_A item_B -r item_C
-      |     |   \
-      |     |    searches for item_A and item_B and replaces with item_C
-      |     |
-      |     |- FindReplace ... -s item_A item_B -r item_C
-      |         \
-      |          searches for item_A and item_B and replaces with item_C
-      |
-      |
-      |   the following are equivilant
-      |    \
-      |     |- FindReplace ... item_A item_B
-      |     |   \
-      |     |    searches for item_A and replaces with item_B
-      |     |
-      |     |- FindReplace ... item_A -r item_B
-      |     |   \
-      |     |    searches for item_A and replaces with item_B
-      |     |
-      |     |- FindReplace ... -s item_A -r item_B
-      |         \
-      |          searches for item_A and replaces with item_B
-      |
-      |
       |   the following are NOT equivilant
       |    \
       |     |- FindReplace ... -s item_A item_B
@@ -75,17 +49,6 @@ long option equivilants:
       |     |    searches for item_A and item_B
       |     |
       |     |- FindReplace ... -s item_A -r item_B
-      |         \
-      |          searches for item_A and replaces with item_B
-      |
-      |
-      |   the following are NOT equivilant
-      |    \
-      |     |- FindReplace ... -s item_A item_B
-      |     |   \
-      |     |    searches for item_A and item_B
-      |     |
-      |     |- FindReplace ... item_A -r item_B
       |         \
       |          searches for item_A and replaces with item_B
       |__________________________________________________________________
