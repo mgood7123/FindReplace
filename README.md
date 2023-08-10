@@ -1,4 +1,8 @@
 ```
+clear ; make CC=clang CXX=clang++ build_release
+```
+
+```
 [1] FindReplace -d/--dir/--dir/-f/--file -s search_items [-r replacement]
 [2] FindReplace dir/file/--stdin search_item [replacement]
 
@@ -37,8 +41,6 @@ long option equivilants:
       | '-r a -r b -r c' will act as if only given '-r c'
       |
       |  CONSTRAINTS:
-      |
-      |  -r is required if -s is given
       |
       |   the following are equivilant
       |    \
