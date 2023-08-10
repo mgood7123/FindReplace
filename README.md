@@ -9,6 +9,7 @@ clear ; make CC=clang CXX=clang++ build_release
 --dry-run          no changes will be made during replacement
 --no-detach        temporary files that are created during a dry run will not be deleted
 --print-all        print non-matches as well as matches
+--silent           dont print any matches from search
 -n                 print file lines as if 'grep -n'
 -i                 ignore case, '-s abc' can match both 'abc' and 'ABC' and 'aBc'
 
