@@ -1,3 +1,4 @@
+```
 [1] FindReplace -d/--dir/--dir/-f/--file -s search_items [-r replacement]
 [2] FindReplace dir/file/--stdin search_item [replacement]
 
@@ -116,3 +117,4 @@ FindReplace -f --stdin -s a "foo \n bar" go -r Alex
 
 printf "fo\$oba1\bg2\\\br1\n2\n" > /tmp/foo && FindReplace -- -f /tmp/foo -s "\$o" "1\b" "2\\\\\\\b" "1\n2" -r "__RACER_X__"
    self explanatory by now, shell $variables are escaped
+```
