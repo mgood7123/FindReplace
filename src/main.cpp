@@ -24,6 +24,7 @@ bool no_detach = false;
 bool print_non_matches = false;
 bool print_lines = false;
 bool ignore_case = false;
+bool silent = false;
 
 struct SearchInfo {
     std::vector<std::string> s;
@@ -272,11 +273,15 @@ struct RegexSearcher : public RegexMatcher<BiDirIt> {
     using SubMatch = typename BASE::SubMatch;
     RegexSearcher() {
         BASE::onMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
-            std::cout << "match: '" << match << "'" << std::endl;
+            if (!silent) {
+                std::cout << "match: '" << match << "'" << std::endl;
+            }
         };
         BASE::onNonMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
-            if (print_non_matches) {
-                std::cout << "non match: '" << match << "'" << std::endl;
+            if (!silent) {
+                if (print_non_matches) {
+                    std::cout << "non match: '" << match << "'" << std::endl;
+                }
             }
         };
     }
@@ -289,22 +294,28 @@ struct RegexSearcherWithLineInfo : public RegexMatcherWithLineInfo<BiDirIt> {
     const char * current_path;
     RegexSearcherWithLineInfo(const char * current_path) : current_path(current_path) {
         BASE::onMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
-            std::cout << "\033[38;2;255;0;0m" << match << "\033[00m";
+            if (!silent) {
+                std::cout << "\033[38;2;255;0;0m" << match << "\033[00m";
+            }
         };
         BASE::onNonMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
-            std::cout << match;
+            if (!silent) {
+                std::cout << match;
+            }
         };
         BASE::onPrintLine = [](RegexMatcher<BiDirIt> * instance, uint64_t line) {
-            const char * color_reset = "\033[00m";
-            const char * file_color = "\033[38;2;128;0;255m";
-            const char * colon_color = "\033[38;2;255;128;255m";
-            const char * line_number_color = "\033[38;2;0;128;255m";
-            std::cout << file_color << static_cast<RegexSearcherWithLineInfo<BiDirIt>*>(instance)->current_path << colon_color << ":" << line_number_color << std::to_string(line) << color_reset << ":";
+            if (!silent) {
+                const char * color_reset = "\033[00m";
+                const char * file_color = "\033[38;2;128;0;255m";
+                const char * colon_color = "\033[38;2;255;128;255m";
+                const char * line_number_color = "\033[38;2;0;128;255m";
+                std::cout << file_color << static_cast<RegexSearcherWithLineInfo<BiDirIt>*>(instance)->current_path << colon_color << ":" << line_number_color << std::to_string(line) << color_reset << ":";
+            }
         };
     }
 };
 
-void invokeMMAP(const char * path) {
+bool invokeMMAP(const char * path) {
     bool is_searching = search_info.r.size() == 0;
 
     auto regex_flags = std::regex::ECMAScript | std::regex::optimize;
@@ -316,7 +327,7 @@ void invokeMMAP(const char * path) {
 
         if (map.is_open() && map.length() == 0) {
             std::cout << "skipping zero length file: " << path << std::endl;
-            return;
+            return false;
         }
 
         MMapIterator begin(map, 0);
@@ -335,7 +346,7 @@ void invokeMMAP(const char * path) {
 
         if (search.length() == 0) {
             std::cout << "skipping zero length search" << std::endl;
-            return;
+            return false;
         }
 
         unescape(search, true, false);
@@ -346,9 +357,9 @@ void invokeMMAP(const char * path) {
 
         std::cout << "searching file '" << path << "' with a length of " << std::to_string(map.length()) << " bytes ..." << std::endl;
         if (print_lines) {
-            RegexSearcherWithLineInfo<MMapIterator>(path).search(begin, end, current, prev, e);
+            return RegexSearcherWithLineInfo<MMapIterator>(path).search(begin, end, current, prev, e);
         } else {
-            RegexSearcher<MMapIterator>().search(begin, end, current, prev, e);
+            return RegexSearcher<MMapIterator>().search(begin, end, current, prev, e);
         }
     } else {
 
@@ -365,7 +376,7 @@ void invokeMMAP(const char * path) {
             if (map.is_open() && old_len == 0) {
                 std::cout << "skipping zero length file: " << path << std::endl;
                 std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
-                return;
+                return false;
             }
 
             MMapIterator begin(map, 0);
@@ -385,7 +396,7 @@ void invokeMMAP(const char * path) {
             if (search.length() == 0) {
                 std::cout << "skipping zero length search" << std::endl;
                 std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
-                return;
+                return false;
             }
 
             unescape(search, true, false);
@@ -404,7 +415,7 @@ void invokeMMAP(const char * path) {
 
             if (!has_matches) {
                 std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
-                return;
+                return false;
             }
 
             if (dry_run) {
@@ -431,7 +442,7 @@ void invokeMMAP(const char * path) {
                 std::cout << "detaching temporary file: " << tmp_file.get_path() << std::endl;
                 tmp_file.detach();
             }
-            return;
+            return false;
         }
 
         MMapHelper map2(tmp_file.get_path().c_str(), 'r');
@@ -439,7 +450,7 @@ void invokeMMAP(const char * path) {
         if (map2.is_open() && map2.length() == 0) {
             std::cout << "skipping zero length file: " << tmp_file.get_path() << std::endl;
             std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
-            return;
+            return false;
         }
 
         auto new_len = map2.length();
@@ -471,17 +482,17 @@ void invokeMMAP(const char * path) {
 
             if (handle == INVALID_HANDLE_VALUE) {
                 std::cout << "failed to open truncate file: " << path << std::endl;
-                return;
+                return false;
             }
 
             if (!SetFilePointerEx(handle, (old_len - new_len)+1, NULL, FILE_BEGIN)) {
                 std::cout << "failed to set file pointer of truncate file: " << path << std::endl;
-                return;
+                return false;
             }
 
             if (!SetEndOfFile(handle)) {
                 std::cout << "failed to truncate file: " << path << std::endl;
-                return;
+                return false;
             }
 
             CloseHandle(handle);
@@ -489,10 +500,11 @@ void invokeMMAP(const char * path) {
             while (truncate(path, (old_len - new_len)+1) == -1) {
                 if (errno == EINTR) continue;
                 std::cout << "failed to truncate file: " << path << std::endl;
-                return;
+                return false;
             }
 #endif
         }
+        return true;
     }
 }
 
@@ -562,13 +574,14 @@ void toOutStream(std::istream * inHandle, std::ostream * outHandle, unsigned int
     std::cout << "copied file to out stream" << std::endl;
 }
 
-void lsdir(const std::string & path)
+bool lsdir(const std::string & path)
 {
+    bool m = false;
     cppfs::FileHandle handle = cppfs::fs::open(path);
 
     if (!handle.exists()) {
         std::cout << "item does not exist:  " << path << std::endl;
-        return;
+        return false;
     }
 
     if (handle.isDirectory())
@@ -580,10 +593,12 @@ void lsdir(const std::string & path)
         }
         // std::cout << "leaving directory:  " << path << std::endl;
     } else if (handle.isFile()) {
-        invokeMMAP(path.c_str());
+        bool r = invokeMMAP(path.c_str());
+        if (!m) m = r;
     } else {
         std::cout << "unknown type:  " << path << std::endl;
     }
+    return m;
 }
 
 #ifdef _WIN32
@@ -610,6 +625,7 @@ void help() {
     puts("--dry-run          no changes will be made during replacement");
     puts("--no-detach        temporary files that are created during a dry run will not be deleted");
     puts("--print-all        print non-matches as well as matches");
+    puts("--silent           dont print any matches from search");
     puts("-n                 print file lines as if 'grep -n'");
     puts("-i                 ignore case, '-s abc' can match both 'abc' and 'ABC' and 'aBc'");
     puts("");
@@ -722,10 +738,12 @@ main(int argc, const char*argv[])
             print_lines = true;
         } else if (strcmp(argv[i], "-i") == 0) {
             ignore_case = true;
+        } else if (strcmp(argv[i], "--silent") == 0) {
+            silent = true;
         }
     }
 
-    auto items_ = find_item(argc, argv, 1, {{"--dry-run", false}, {"--no-detach", false}, {"--print-all", false}, {"-n", false}, {"-i", false}});
+    auto items_ = find_item(argc, argv, 1, {{"--dry-run", false}, {"--no-detach", false}, {"--print-all", false}, {"-n", false}, {"-i", false}, {"--silent", false}});
     auto items = find_item(argc, argv, 1, {{"-h", true}, {"--help", true}, {"-f", true}, {"--file", true}, {"-d", true}, {"--dir", true}, {"--directory", true}, {"-s", true}, {"--search", true}, {"-r", true}, {"--replace", true}});
     if (items.size() == 0) {
 
@@ -763,14 +781,14 @@ main(int argc, const char*argv[])
             std__in__file.flush();
             std__in__file.close();
 
-            invokeMMAP(tmp_file.get_path().c_str());
+            return invokeMMAP(tmp_file.get_path().c_str()) ? 0 : 1;
         } else {
             std::cout << "directory/file to search:  " << dir << std::endl;
             std::cout << "searching for:        " << search_info.s[0] << std::endl;
             if (search_info.r.size() != 0) {
                 std::cout << "replacing with:       " << search_info.r << std::endl;
             }
-            lsdir(dir);
+            return lsdir(dir) ? 0 : 1;
         }
     } else {
         // we have flags
@@ -788,14 +806,14 @@ main(int argc, const char*argv[])
             if (p.second.first != nullptr) {
                 if (p.second.second && p.first == argc-1) {
                     std::cout << p.second.first << " must have an argument" << std::endl;
-                    exit(1);
+                    return 1;
                 }
                 if (p.second.second) {
                     for (auto & p1 : items) {
                         if (p1.second.first != nullptr) {
                             if (p1.first-1 == p.first) {
                                 std::cout << p.second.first << " must not be followed by a flag: " << p1.second.first << std::endl;
-                                exit(1);
+                                return 1;
                             }
                         }
                     }
@@ -823,7 +841,7 @@ main(int argc, const char*argv[])
 
         if (!is_stdin && files.size() == 0 && directories.size() == 0) {
             std::cout << "no files/directories specified" << std::endl;
-            exit(1);
+            return 1;
         }
 
         // collect search
@@ -851,7 +869,7 @@ main(int argc, const char*argv[])
 
         if (searches.size() == 0) {
             std::cout << "no search items found" << std::endl;
-            exit(1);
+            return 1;
         }
 
 
@@ -873,13 +891,17 @@ main(int argc, const char*argv[])
             search_info.r = rep;
         }
 
+        bool m = false;
+
         for (auto f : files) {
             std::cout << "file to search:  " << f << std::endl;
-            lsdir(f);
+            bool r = lsdir(f);
+            if (!m) m = r;
         }
         for (auto d : directories) {
             std::cout << "directory to search:  " << d << std::endl;
-            lsdir(d);
+            bool r = lsdir(d);
+            if (!m) m = r;
         }
 
         if (is_stdin) {
@@ -899,8 +921,9 @@ main(int argc, const char*argv[])
             std__in__file.flush();
             std__in__file.close();
 
-            invokeMMAP(tmp_file.get_path().c_str());
+            bool r = invokeMMAP(tmp_file.get_path().c_str());
+            if (!m) m = r;
         }
+        return m ? 0 : 1;
     }
-    return 0;
 }
