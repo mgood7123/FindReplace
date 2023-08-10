@@ -131,11 +131,12 @@ struct RegexMatcher {
 
     std::function<void(RegexMatcher<BiDirIt> * instance, SubMatch data)> onMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch data) {}, onNonMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch data) {};
 
-    void search(BiDirIt begin, BiDirIt end, std::match_results<BiDirIt> current, std::match_results<BiDirIt> prev, std::regex regex) {
-        search_ref(begin, end, current, prev, regex);
+    bool search(BiDirIt begin, BiDirIt end, std::match_results<BiDirIt> current, std::match_results<BiDirIt> prev, std::regex regex) {
+        return search_ref(begin, end, current, prev, regex);
     }
 
-    void search_ref(BiDirIt & begin, BiDirIt & end, std::match_results<BiDirIt> & current, std::match_results<BiDirIt> & prev, std::regex & regex) {
+    bool search_ref(BiDirIt & begin, BiDirIt & end, std::match_results<BiDirIt> & current, std::match_results<BiDirIt> & prev, std::regex & regex) {
+        bool match = false;
         while(std::regex_search(begin, end, current, regex)) {
             prev = current;
             if (current.size() != 0) {
@@ -147,6 +148,7 @@ struct RegexMatcher {
             for (size_t i = 0; i < current.size(); ++i) {
                 auto & n = current[i];
                 if (n.length() != 0) {
+                    match = true;
                     onMatch(this, n);
                 }
             }
@@ -163,6 +165,7 @@ struct RegexMatcher {
                 onNonMatch(this, {begin, end});
             }
         }
+        return match;
     }
 };
 
@@ -392,10 +395,16 @@ void invokeMMAP(const char * path) {
             std::match_results<MMapIterator> current, prev;
 
             std::cout << "searching file '" << path << "' with a length of " << std::to_string(map.length()) << " bytes ..." << std::endl;
+            bool has_matches;
             if (print_lines) {
-                RegexSearcherWithLineInfo<MMapIterator>(path).search(begin, end, current, prev, e);
+                has_matches = RegexSearcherWithLineInfo<MMapIterator>(path).search(begin, end, current, prev, e);
             } else {
-                RegexSearcher<MMapIterator>().search(begin, end, current, prev, e);
+                has_matches = RegexSearcher<MMapIterator>().search(begin, end, current, prev, e);
+            }
+
+            if (!has_matches) {
+                std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
+                return;
             }
 
             if (dry_run) {
