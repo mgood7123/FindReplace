@@ -363,8 +363,7 @@ bool invokeMMAP(const char * path) {
         }
     } else {
 
-        TempFile tmp_file("FindReplace__replace_");
-        std::cout << "created temporary file: " << tmp_file.get_path() << std::endl;
+        TempFile tmp_file("FindReplace__replace_", true);
 
         std::size_t old_len;
 
@@ -414,7 +413,6 @@ bool invokeMMAP(const char * path) {
             }
 
             if (!has_matches) {
-                std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
                 return false;
             }
 
@@ -436,20 +434,19 @@ bool invokeMMAP(const char * path) {
         // file is unmapped
 
         if (dry_run) {
+            // for sake of readability
             if (no_detach) {
-                std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
+                return false;
             } else {
-                std::cout << "detaching temporary file: " << tmp_file.get_path() << std::endl;
                 tmp_file.detach();
+                return false;
             }
-            return false;
         }
 
         MMapHelper map2(tmp_file.get_path().c_str(), 'r');
 
         if (map2.is_open() && map2.length() == 0) {
             std::cout << "skipping zero length file: " << tmp_file.get_path() << std::endl;
-            std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
             return false;
         }
 
