@@ -1,0 +1,9 @@
+[submodule "cppfs"]
+	path = cppfs
+	url = https://github.com/cginternals/cppfs
+[submodule "mmaptwo-plus"]
+	path = mmaptwo-plus
+	url = https://github.com/codylico/mmaptwo-plus
+[submodule "TempFile"]
+	path = TempFile
+	url = https://github.com/mgood7123/TempFile
