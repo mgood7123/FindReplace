@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include <mmap_iterator.h>
+#include <ifstream_iterator.h>
 
 #include <tmpfile.h>
 
@@ -19,35 +20,215 @@
 #include <sys/types.h>
 #endif
 
+namespace DarcsPatch {
+    // STD IMPL - LLDB by default will not step into std code, this is good EXCEPT if we want to step into DarcsPatch::function
+    // stepping into DarcsPatch::function is required in order to step info our assigned function callback
+
+    /**
+      *  @brief  Forward an lvalue.
+      *  @return The parameter cast to the specified type.
+      *
+      *  This function is used to implement "perfect forwarding".
+      */
+    template<typename _Tp>
+    constexpr _Tp&&
+    forward(typename std::remove_reference<_Tp>::type& __t) noexcept
+    { return static_cast<_Tp&&>(__t); }
+
+    /**
+      *  @brief  Forward an rvalue.
+      *  @return The parameter cast to the specified type.
+      *
+      *  This function is used to implement "perfect forwarding".
+      */
+    template<typename _Tp>
+    constexpr _Tp&&
+    forward(typename std::remove_reference<_Tp>::type&& __t) noexcept
+    {
+        static_assert(!std::is_lvalue_reference<_Tp>::value, "template argument"
+            " substituting _Tp is an lvalue reference type");
+        return static_cast<_Tp&&>(__t);
+    }
+
+    namespace detail
+    {
+        template<class>
+        constexpr bool is_reference_wrapper_v = false;
+        template<class U>
+        constexpr bool is_reference_wrapper_v<std::reference_wrapper<U>> = true;
+    
+        template<class C, class Pointed, class T1, class... Args>
+        constexpr decltype(auto) invoke_memptr(Pointed C::* f, T1&& t1, Args&&... args)
+        {
+            if constexpr (std::is_function_v<Pointed>)
+            {
+                if constexpr (std::is_base_of_v<C, std::decay_t<T1>>)
+                    return (DarcsPatch::forward<T1>(t1).*f)(DarcsPatch::forward<Args>(args)...);
+                else if constexpr (is_reference_wrapper_v<std::decay_t<T1>>)
+                    return (t1.get().*f)(DarcsPatch::forward<Args>(args)...);
+                else
+                    return ((*DarcsPatch::forward<T1>(t1)).*f)(DarcsPatch::forward<Args>(args)...);
+            }
+            else
+            {
+                static_assert(std::is_object_v<Pointed> && sizeof...(args) == 0);
+                if constexpr (std::is_base_of_v<C, std::decay_t<T1>>)
+                    return DarcsPatch::forward<T1>(t1).*f;
+                else if constexpr (is_reference_wrapper_v<std::decay_t<T1>>)
+                    return t1.get().*f;
+                else
+                    return (*DarcsPatch::forward<T1>(t1)).*f;
+            }
+        }
+    } // namespace detail
+    
+    template<class F, class... Args>
+    constexpr std::invoke_result_t<F, Args...> invoke(F&& f, Args&&... args)
+        noexcept(std::is_nothrow_invocable_v<F, Args...>)
+    {
+        if constexpr (std::is_member_pointer_v<std::decay_t<F>>)
+            return DarcsPatch::detail::invoke_memptr(f, DarcsPatch::forward<Args>(args)...);
+        else
+            return DarcsPatch::forward<F>(f)(DarcsPatch::forward<Args>(args)...);
+    }
+
+    template<typename Result,typename ...Args>
+    struct abstract_function
+    {
+        virtual Result operator()(Args... args)=0;
+        virtual abstract_function *clone() const =0;
+        virtual ~abstract_function() = default;
+    };
+
+    template<typename Func,typename Result,typename ...Args>
+    class concrete_function: public abstract_function<Result,Args...>
+    {
+        Func f;
+    public:
+        concrete_function(const Func &x)
+            : f(x)
+        {}
+        Result operator()(Args... args) override
+        {
+            return DarcsPatch::invoke(f, args...);
+        }
+        concrete_function *clone() const override
+        {
+            return new concrete_function{f};
+        }
+    };
+
+    template<typename Func>
+    struct func_filter
+    {
+        typedef Func type;
+    };
+    template<typename Result,typename ...Args>
+    struct func_filter<Result(Args...)>
+    {
+        typedef Result (*type)(Args...);
+    };
+
+    template<typename signature>
+    class function;
+
+    template<typename Result,typename ...Args>
+    class function<Result(Args...)>
+    {
+        abstract_function<Result,Args...> *f;
+    public:
+        function()
+            : f(nullptr)
+        {}
+        template<typename Func> function(const Func &x)
+            : f(new concrete_function<typename func_filter<Func>::type,Result,Args...>(x))
+        {}
+        function(const function &rhs)
+            : f(rhs.f ? rhs.f->clone() : nullptr)
+        {}
+        function &operator=(const function &rhs)
+        {
+            if( (&rhs != this ) && (rhs.f) )
+            {
+                auto *temp = rhs.f->clone();
+                delete f;
+                f = temp;
+            }
+            return *this;
+        }
+        template<typename Func> function &operator=(const Func &x)
+        {
+            auto *temp = new concrete_function<typename func_filter<Func>::type,Result,Args...>(x);
+            delete f;
+            f = temp;
+            return *this;
+        }
+        Result operator()(Args... args) const
+        {
+            if(f)
+                return DarcsPatch::invoke(*f, args...);
+            else
+                throw std::bad_function_call();
+        }
+        ~function()
+        {
+            delete f;
+        }
+    };
+}
+
+
+#define IFSTREAM_ITERATOR_CHUNK_SIZE (4096*4000)
+
 bool dry_run = false;
 bool no_detach = false;
 bool print_non_matches = false;
 bool print_lines = false;
 bool ignore_case = false;
 bool silent = false;
+bool use_mmap = true;
 
 struct SearchInfo {
     std::vector<std::string> s;
+    std::string search;
     std::string r;
 } search_info;
 
 #include <regex>
 
-std::string print_escaped(const std::string& s)
-{
-  std::string x;
+std::string escape(const char c) {
+    if (c == '\n') return "\\n";
+    else if (c == '\t') return "\\t";
+    else if (c == '\r') return "\\r";
+    else if (c == '\v') return "\\v";
+    else if (c == '\b') return "\\b";
+    else if (c == '\\') return "\\\\";
+    else {
+        char s[2] = {c, '\0'};
+        return s;
+    }
+}
+
+std::string escape(const std::string & s) {
+    std::string x;
     if (s.size() != 0) {
         for (int i = 0, m = s.size()-1; i <= m; i++) {
             const char c = s[i];
-            if (c == '\n') x += "\\n";
-            else if (c == '\t') x += "\\t";
-            else if (c == '\r') x += "\\r";
-            else if (c == '\v') x += "\\v";
-            else if (c == '\b') x += "\\b";
-            else if (c == '\\') x += "\\\\";
-            else x += c;
+            if (c == '\n') x.append("\\n");
+            else if (c == '\t') x.append("\\t");
+            else if (c == '\r') x.append("\\r");
+            else if (c == '\v') x.append("\\v");
+            else if (c == '\b') x.append("\\b");
+            else if (c == '\\') x.append("\\\\");
+            else x.push_back(c);
         }
     }
+    return x;
+}
+
+std::string print_escaped(const std::string& s)
+{
+    std::string x = escape(s);
     std::cout << "const char x [" << std::to_string(x.size()+1) << "] = {";
     if (x.size() != 0) {
         for (int i = 0, m = x.size()-1; i <= m; i++) {
@@ -59,7 +240,7 @@ std::string print_escaped(const std::string& s)
         }
     }
     std::cout << " '\\0' };" << std::endl;
-  return x;
+    return x;
 }
 
 std::string unescape(const std::string& s, bool unescape_regex, bool unescape_regex_replace)
@@ -71,66 +252,82 @@ std::string unescape(const std::string& s, bool unescape_regex, bool unescape_re
         for (int i = 0, m = s.size()-1; i <= m; i++) {
             const char c = s[i];
             if (slash) {
-                if (c == '\\') x += '\\';
-                else if (c == 't') x += '\t';
-                else if (c == 'r') x += '\r';
-                else if (c == 'v') x += '\v';
-                else if (c == 'b') x += '\b';
+                if (c == '\\') x.push_back('\\');
+                else if (c == 't') x.push_back('\t');
+                else if (c == 'r') x.push_back('\r');
+                else if (c == 'v') x.push_back('\v');
+                else if (c == 'b') x.push_back('\b');
                 else {
                     // unknown escape
-                    x += '\\';
-                    x += c;
+                    x.push_back('\\');
+                    x.push_back(c);
                 }
                 slash = false;
             } else {
                 if ((unescape_regex || unescape_regex_replace) && c == '\\') slash = true;
-                else if (unescape_regex && c == '$') x += "\\$";
-                else if (unescape_regex && c == '|') x += "\\|";
-                else if (unescape_regex && c == '^') x += "\\^";
-                else if (unescape_regex && c == '.') x += "\\.";
-                else if (unescape_regex && c == '+') x += "\\+";
-                else if (unescape_regex && c == '-') x += "\\-";
-                else if (unescape_regex && c == '?') x += "\\?";
-                else if (unescape_regex && c == '*') x += "\\*";
-                else if (unescape_regex && c == '(') x += "\\(";
-                else if (unescape_regex && c == ')') x += "\\)";
-                else if (unescape_regex && c == '{') x += "\\{";
-                else if (unescape_regex && c == '}') x += "\\}";
-                else if (unescape_regex && c == '[') x += "\\[";
-                else if (unescape_regex && c == ']') x += "\\]";
-                else if (unescape_regex_replace && c == '$') x += "$$";
-                else x += c;
+                else if (unescape_regex && c == '$') x.append("\\$");
+                else if (unescape_regex && c == '|') x.append("\\|");
+                else if (unescape_regex && c == '^') x.append("\\^");
+                else if (unescape_regex && c == '.') x.append("\\.");
+                else if (unescape_regex && c == '+') x.append("\\+");
+                else if (unescape_regex && c == '-') x.append("\\-");
+                else if (unescape_regex && c == '?') x.append("\\?");
+                else if (unescape_regex && c == '*') x.append("\\*");
+                else if (unescape_regex && c == '(') x.append("\\(");
+                else if (unescape_regex && c == ')') x.append("\\)");
+                else if (unescape_regex && c == '{') x.append("\\{");
+                else if (unescape_regex && c == '}') x.append("\\}");
+                else if (unescape_regex && c == '[') x.append("\\[");
+                else if (unescape_regex && c == ']') x.append("\\]");
+                else if (unescape_regex_replace && c == '$') x.append("$$");
+                else x.push_back(c);
             }
         }
         if (slash) {
-            x += "\\\\";
+            x.append("\\\\");
         }
     }
     //print_escaped(x);
   return x;
 }
 
+#include <list>
+
 template <typename BiDirIt>
 struct RegexMatcher {
 
     struct SubMatch {
-        std::string string;
-        BiDirIt begin, end;
-        std::sub_match<BiDirIt> sub_match;
-        bool is_string;
-        bool is_sub_match;
+        std::string::iterator s_first, s_second;
+        BiDirIt b_first, b_second;
+        bool is_bidir = false;
 
-        SubMatch() : is_string(false), is_sub_match(false) {}
-        SubMatch(std::string & string) : string(string), is_string(true), is_sub_match(false) {}
-        SubMatch(BiDirIt begin, BiDirIt end) : begin(begin), end(end), is_string(false), is_sub_match(false) {}
-        SubMatch(std::sub_match<BiDirIt> sub_match) : sub_match(sub_match), is_string(false), is_sub_match(true) {}
+        SubMatch() : is_bidir(false) {}
 
-        friend std::ostream & operator << (std::ostream & os, SubMatch & o) {
-            return o.is_sub_match ? os << o.sub_match : o.is_string ? os << o.string : os << std::string(o.begin, o.end);
+        SubMatch(std::string::iterator begin, std::string::iterator end) : s_first(begin), s_second(end), is_bidir(false) {}
+
+        SubMatch(BiDirIt begin, BiDirIt end) : b_first(begin), b_second(end), is_bidir(true) {}
+
+        friend std::ostream & operator << (std::ostream & os, const SubMatch & o) {
+            if (o.is_bidir) {
+                for (BiDirIt begin = o.b_first; begin != o.b_second; begin++) {
+                    os << *begin;
+                }
+            } else {
+                for (auto begin = o.s_first; begin != o.s_second; begin++) {
+                    os << *begin;
+                }
+            }
+            return os;
         }
     };
 
-    std::function<void(RegexMatcher<BiDirIt> * instance, SubMatch data)> onMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch data) {}, onNonMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch data) {};
+    DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, const SubMatch & match)> onMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {}, onNonMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {};
+    DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance)> onFinish = [](RegexMatcher<BiDirIt> * instance) {};
+
+    bool search(BiDirIt begin, BiDirIt end, std::regex regex) {
+        std::match_results<BiDirIt> current, prev;
+        return search_ref(begin, end, current, prev, regex);
+    }
 
     bool search(BiDirIt begin, BiDirIt end, std::match_results<BiDirIt> current, std::match_results<BiDirIt> prev, std::regex regex) {
         return search_ref(begin, end, current, prev, regex);
@@ -138,34 +335,54 @@ struct RegexMatcher {
 
     bool search_ref(BiDirIt & begin, BiDirIt & end, std::match_results<BiDirIt> & current, std::match_results<BiDirIt> & prev, std::regex & regex) {
         bool match = false;
-        while(std::regex_search(begin, end, current, regex)) {
+        while(true) {
+            // std::cout << std::endl << "start search using std::regex_search" << std::endl;
+            bool ret = std::regex_search(begin, end, current, regex);
+            // std::cout << "std::regex_search returned " << (ret ? "true" : "false") << std::endl << std::endl;
+            if (!ret) break;
             prev = current;
-            if (current.size() != 0) {
-                auto n = current.prefix();
-                if (n.length() != 0) {
-                    onNonMatch(this, n);
+            if (!silent) {
+                if (current.size() != 0) {
+                    auto n = current.prefix();
+                    if (n.first != n.second) {
+                        // std::cout << std::endl << "invoking onNonMatch" << std::endl;
+                        onNonMatch(this, {n.first, n.second});
+                        // std::cout << "invoked onNonMatch" << std::endl << std::endl;
+                    }
                 }
             }
             for (size_t i = 0; i < current.size(); ++i) {
                 auto & n = current[i];
-                if (n.length() != 0) {
+                if (n.first != n.second) {
                     match = true;
-                    onMatch(this, n);
+                    // std::cout << std::endl << "invoking onMatch" << std::endl;
+                    onMatch(this, {n.first, n.second});
+                    // std::cout << "invoked onMatch" << std::endl << std::endl;
                 }
             }
 
-            begin = std::next(begin, current.position() + current.length());
+            auto next_i = current.position() + current.length();
+            begin = std::next(begin, next_i);
         }
-        if (prev.size() != 0) {
-            auto n = prev.suffix();
-            if (n.length() != 0) {
-                onNonMatch(this, n);
-            }
-        } else {
-            if (begin != end) {
-                onNonMatch(this, {begin, end});
+        if (!silent) {
+            if (prev.size() != 0) {
+                auto n = prev.suffix();
+                if (n.first != n.second) {
+                    // std::cout << std::endl << "invoking onNonMatch" << std::endl;
+                    onNonMatch(this, {n.first, n.second});
+                    // std::cout << "invoked onNonMatch" << std::endl << std::endl;
+                }
+            } else {
+                if (begin != end) {
+                    // std::cout << std::endl << "invoking onNonMatch" << std::endl;
+                    onNonMatch(this, {begin, end});
+                    // std::cout << "invoked onNonMatch" << std::endl << std::endl;
+                }
             }
         }
+        // std::cout << std::endl << "invoking onFinish" << std::endl;
+        onFinish(this);
+        // std::cout << "invoked onFinish" << std::endl << std::endl;
         return match;
     }
 };
@@ -177,78 +394,84 @@ struct RegexMatcherWithLineInfo : public RegexMatcher<BiDirIt> {
 
     int64_t line = 0;
 
-    std::function<void(RegexMatcher<BiDirIt> * instance, SubMatch data)> onMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch data) {}, onNonMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch data) {};
-    std::function<void(RegexMatcher<BiDirIt> * instance, uint64_t line)> onPrintLine = [](RegexMatcher<BiDirIt> * instance, uint64_t line) {};
+    DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, const SubMatch & match)> onMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {}, onNonMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {};
+    DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, uint64_t line)> onPrintLine = [](RegexMatcher<BiDirIt> * instance, uint64_t line) {};
 
     private:
 
-    std::string accumulation;
+    std::list<std::string> accumulation;
     bool was_on_match = false;
     bool needs_reset = true;
     bool line_has_match = false;
 
-    std::vector<std::pair<std::function<void(RegexMatcher<BiDirIt> * instance, SubMatch data)>, SubMatch>> matches;
+    using MATCHES = std::vector<std::pair<DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, const SubMatch & match)>, SubMatch>>;
 
-    void reset(RegexMatcher<BiDirIt> * instance, std::function<void(RegexMatcher<BiDirIt> * instance, SubMatch data)> & match_func) {
+    MATCHES matches;
+
+    void reset(RegexMatcher<BiDirIt> * instance, DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, const SubMatch & match)> & match_func) {
         if (print_lines && (print_non_matches || line_has_match)) {
             if (matches.size() != 0) {
                 onPrintLine(instance, line);
                 for (auto & p : matches) {
                     p.first(instance, p.second);
                 }
-                if (accumulation.size() != 0) {
-                    match_func(instance, accumulation);
+                if (accumulation.back().size() != 0) {
+                    match_func(instance, {accumulation.back().begin(), accumulation.back().end()});
                 }
             } else {
-                if (accumulation.size() != 0) {
+                if (accumulation.back().size() != 0) {
                     onPrintLine(instance, line);
-                    match_func(instance, accumulation);
+                    match_func(instance, {accumulation.back().begin(), accumulation.back().end()});
                 }
             }
         }
         line++;
         if (!print_lines && (print_non_matches || line_has_match)) {
-            if (accumulation.size() != 0) {
+            if (accumulation.back().size() != 0) {
                 onPrintLine(instance, line);
-                match_func(instance, accumulation);
+                match_func(instance, {accumulation.back().begin(), accumulation.back().end()});
             }
         }
-        accumulation = "";
-        matches = std::move(std::vector<std::pair<std::function<void(RegexMatcher<BiDirIt> * instance, SubMatch data)>, SubMatch>>());
+        accumulation = std::move(std::list<std::string>());
+        accumulation.emplace_back(std::string());
+        matches = std::move(MATCHES());
     }
-    void process(RegexMatcher<BiDirIt> * instance, std::function<void(RegexMatcher<BiDirIt> * instance, SubMatch data)> & match_func, std::function<void(RegexMatcher<BiDirIt> * instance, SubMatch data)> & match_func_opposite, bool from_on_match, const char c) {
-        if (was_on_match != from_on_match && accumulation.size() != 0) {
-            if (accumulation.size() != 0) {
-                if (print_lines) {
-                    matches.push_back({match_func_opposite, accumulation});
-                } else {
-                    match_func_opposite(instance, accumulation);
-                }
+
+    void finish(RegexMatcher<BiDirIt> * instance, DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, const SubMatch & match)> & match_func, DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, const SubMatch & match)> & match_func_opposite, bool from_on_match) {
+        if (was_on_match != from_on_match && accumulation.back().size() != 0) {
+            if (print_lines) {
+                matches.push_back({match_func_opposite, {accumulation.back().begin(), accumulation.back().end()}});
+            } else {
+                match_func_opposite(instance, {accumulation.back().begin(), accumulation.back().end()});
             }
-            accumulation = "";
+            accumulation.emplace_back(std::string());
             was_on_match = from_on_match;
         }
         if (needs_reset) {
             reset(instance, match_func);
             needs_reset = false;
             line_has_match = false;
+            std::cout.flush();
         }
-        accumulation.push_back(c);
+    }
+    void process(RegexMatcher<BiDirIt> * instance, DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, const SubMatch & match)> & match_func, DarcsPatch::function<void(RegexMatcher<BiDirIt> * instance, const SubMatch & match)> & match_func_opposite, bool from_on_match, const char c) {
+        // std::cout << "process: char = " << escape(c) << std::endl;
+        finish(this, match_func, match_func_opposite, from_on_match);
+        accumulation.back().push_back(c);
         if (c == '\n') {
             needs_reset = true;
         }
         if (from_on_match) line_has_match = true;
     }
-    void flush(RegexMatcher<BiDirIt> * instance, SubMatch & match, bool from_on_match) {
+    void flush(RegexMatcher<BiDirIt> * instance, const SubMatch & match, bool from_on_match) {
         auto match_func = from_on_match ? onMatch : onNonMatch;
         auto match_func_opposite = !from_on_match ? onMatch : onNonMatch;
-        if (match.is_sub_match) {
-            auto str = match.sub_match.str();
-            for (auto c : str) {
-                process(instance, match_func, match_func_opposite, from_on_match, c);
+        if (match.is_bidir) {
+            for (BiDirIt begin = match.b_first; begin != match.b_second; begin++) {
+                process(instance, match_func, match_func_opposite, from_on_match, *begin);
             }
         } else {
-            for (BiDirIt begin = match.begin; begin != match.end; begin++) {
+            for (auto begin = match.s_first; begin != match.s_second; begin++) {
                 process(instance, match_func, match_func_opposite, from_on_match, *begin);
             }
         }
@@ -258,12 +481,22 @@ struct RegexMatcherWithLineInfo : public RegexMatcher<BiDirIt> {
     public:
 
     RegexMatcherWithLineInfo() {
-        RegexMatcher<BiDirIt>::onMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
+        RegexMatcher<BiDirIt>::onMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {
             static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->flush(instance, match, true);
         };
-        RegexMatcher<BiDirIt>::onNonMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
+        RegexMatcher<BiDirIt>::onNonMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {
             static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->flush(instance, match, false);
         };
+        RegexMatcher<BiDirIt>::onFinish = [](RegexMatcher<BiDirIt> * instance) {
+            if (static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->needs_reset) {
+                static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->finish(instance, static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->onNonMatch, static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->onMatch, false);
+            } else {
+                static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->needs_reset = true;
+                static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->accumulation.back().push_back('\n');
+                static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->finish(instance, static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->onNonMatch, static_cast<RegexMatcherWithLineInfo<BiDirIt>*>(instance)->onMatch, false);
+            }
+        };
+        accumulation.emplace_back(std::string());
     }
 };
 
@@ -272,12 +505,12 @@ struct RegexSearcher : public RegexMatcher<BiDirIt> {
     using BASE = RegexMatcher<BiDirIt>;
     using SubMatch = typename BASE::SubMatch;
     RegexSearcher() {
-        BASE::onMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
+        BASE::onMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {
             if (!silent) {
                 std::cout << "match: '" << match << "'" << std::endl;
             }
         };
-        BASE::onNonMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
+        BASE::onNonMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {
             if (!silent) {
                 if (print_non_matches) {
                     std::cout << "non match: '" << match << "'" << std::endl;
@@ -293,12 +526,12 @@ struct RegexSearcherWithLineInfo : public RegexMatcherWithLineInfo<BiDirIt> {
     using SubMatch = typename BASE::SubMatch;
     const char * current_path;
     RegexSearcherWithLineInfo(const char * current_path) : current_path(current_path) {
-        BASE::onMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
+        BASE::onMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {
             if (!silent) {
                 std::cout << "\033[38;2;255;0;0m" << match << "\033[00m";
             }
         };
-        BASE::onNonMatch = [](RegexMatcher<BiDirIt> * instance, SubMatch match) {
+        BASE::onNonMatch = [](RegexMatcher<BiDirIt> * instance, const SubMatch & match) {
             if (!silent) {
                 std::cout << match;
             }
@@ -323,43 +556,53 @@ bool invokeMMAP(const char * path) {
 
     if (is_searching) {
 
-        MMapHelper map(path, 'r');
+        if (use_mmap) {
+            MMapHelper map(path, 'r');
 
-        if (map.is_open() && map.length() == 0) {
-            std::cout << "skipping zero length file: " << path << std::endl;
-            return false;
-        }
+            auto map_len = map.length();
 
-        MMapIterator begin(map, 0);
-        MMapIterator end(map, map.length());
-
-        std::string search;
-        bool first = true;
-        for (auto s : search_info.s) {
-            if (first) {
-                first = false;
-            } else {
-                search += "|";
+            if (map.is_open() && map_len == 0) {
+                std::cout << "skipping zero length file: " << path << std::endl;
+                return false;
             }
-            search += unescape(s, true, false);
-        }
 
-        if (search.length() == 0) {
-            std::cout << "skipping zero length search" << std::endl;
-            return false;
-        }
+            MMapIterator begin(map, 0);
+            MMapIterator end(map, map_len);
 
-        unescape(search, true, false);
+            std::regex e(search_info.search, regex_flags);
 
-        std::match_results<MMapIterator> current, prev;
-
-        std::regex e(search, regex_flags);
-
-        std::cout << "searching file '" << path << "' with a length of " << std::to_string(map.length()) << " bytes ..." << std::endl;
-        if (print_lines) {
-            return RegexSearcherWithLineInfo<MMapIterator>(path).search(begin, end, current, prev, e);
+            std::cout << "searching file '" << path << "' with a length of " << std::to_string(map_len) << " bytes ..." << std::endl;
+            std::cout << "using mmap api" << std::endl;
+            // for (auto begin_ = begin; begin_ != end; begin_++) {
+            //     auto c = *begin_;
+            // }
+            // return true;
+            if (print_lines && !silent) {
+                return RegexSearcherWithLineInfo<MMapIterator>(path).search(begin, end, e);
+            } else {
+                return RegexSearcher<MMapIterator>().search(begin, end, e);
+            }
         } else {
-            return RegexSearcher<MMapIterator>().search(begin, end, current, prev, e);
+            std::regex e(search_info.search, regex_flags);
+
+            std::cout << "searching file '" << path << "' ..." << std::endl;
+            std::cout << "using ifstream api" << std::endl;
+            auto stream = std::ifstream(path, std::ios::binary | std::ios::in);
+            // for (std::string line; std::getline(stream, line); ) {
+
+            // }
+            // return true;
+            auto begin = ifstream_iterator(stream, 0);
+            auto end = ifstream_iterator(stream);
+            // for (auto begin_ = begin; begin_ != end; begin_++) {
+            //     auto c = *begin_;
+            // }
+            // return true;
+            if (print_lines && !silent) {
+                return RegexSearcherWithLineInfo<ifstream_iterator>(path).search(begin, end, e);
+            } else {
+                return RegexSearcher<ifstream_iterator>().search(begin, end, e);
+            }
         }
     } else {
 
@@ -367,53 +610,31 @@ bool invokeMMAP(const char * path) {
 
         std::size_t old_len;
 
-        {
+        if (use_mmap) {
             MMapHelper map(path, 'r');
 
             old_len = map.length();
 
             if (map.is_open() && old_len == 0) {
                 std::cout << "skipping zero length file: " << path << std::endl;
-                std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
                 return false;
             }
 
             MMapIterator begin(map, 0);
             MMapIterator end(map, old_len);
 
-            std::string search;
-            bool first = true;
-            for (auto s : search_info.s) {
-                if (first) {
-                    first = false;
-                } else {
-                    search += "|";
-                }
-                search += unescape(s, true, false);
-            }
-
-            if (search.length() == 0) {
-                std::cout << "skipping zero length search" << std::endl;
-                std::cout << "closing temporary file: " << tmp_file.get_path() << std::endl;
-                return false;
-            }
-
-            unescape(search, true, false);
-
-            std::regex e(search, regex_flags);
-
-            std::match_results<MMapIterator> current, prev;
+            std::regex e(search_info.search, regex_flags);
 
             std::cout << "searching file '" << path << "' with a length of " << std::to_string(map.length()) << " bytes ..." << std::endl;
-            bool has_matches;
-            if (print_lines) {
-                has_matches = RegexSearcherWithLineInfo<MMapIterator>(path).search(begin, end, current, prev, e);
+            std::cout << "using mmap api" << std::endl;
+            if (print_lines && !silent) {
+                if (!RegexSearcherWithLineInfo<MMapIterator>(path).search(begin, end, e)) {
+                    return false;
+                }
             } else {
-                has_matches = RegexSearcher<MMapIterator>().search(begin, end, current, prev, e);
-            }
-
-            if (!has_matches) {
-                return false;
+                if (!RegexSearcher<MMapIterator>().search(begin, end, e)) {
+                    return false;
+                }
             }
 
             if (dry_run) {
@@ -424,14 +645,56 @@ bool invokeMMAP(const char * path) {
             std::ofstream o (tmp_file.get_path(), std::ios::binary | std::ios::out);
 
             auto out_iter = std::ostream_iterator<char>(o);
-            std::regex_replace(out_iter, begin, end, e, unescape(search_info.r, false, true));
+
+            std::regex_replace(out_iter, begin, end, e, search_info.r);
+
+            o.flush();
+            o.close();
+
+            // end of mmap scope
+        } else {
+            std::regex e(search_info.search, regex_flags);
+
+            std::cout << "searching file '" << path << "' ..." << std::endl;
+            std::cout << "using ifstream api" << std::endl;
+            auto stream = std::ifstream(path, std::ios::binary | std::ios::in);
+
+            ifstream_iterator::State stream_init;
+            stream_init.save(&stream);
+
+            auto begin = ifstream_iterator(stream, 0);
+            auto end = ifstream_iterator(stream);
+
+            if (print_lines && !silent) {
+                if (!RegexSearcherWithLineInfo<ifstream_iterator>(path).search(begin, end, e)) {
+                    return false;
+                }
+            } else {
+                if (!RegexSearcher<ifstream_iterator>().search(begin, end, e)) {
+                    return false;
+                }
+            }
+
+            if (dry_run) {
+                std::cout << "replacing (dry run) ..." << std::endl;
+            } else {
+                std::cout << "replacing ..." << std::endl;
+            }
+
+            std::ofstream o (tmp_file.get_path(), std::ios::binary | std::ios::out);
+
+            auto out_iter = std::ostream_iterator<char>(o);
+
+            stream_init.restore(&stream);
+            auto begin_ = ifstream_iterator(stream, 0);
+            auto end_ = ifstream_iterator(stream);
+            std::regex_replace(out_iter, begin_, end_, e, search_info.r);
 
             o.flush();
             o.close();
 
             // end of mmap scope
         }
-        // file is unmapped
 
         if (dry_run) {
             // for sake of readability
@@ -445,12 +708,13 @@ bool invokeMMAP(const char * path) {
 
         MMapHelper map2(tmp_file.get_path().c_str(), 'r');
 
-        if (map2.is_open() && map2.length() == 0) {
+        auto new_len = map2.length();
+
+        if (map2.is_open() && new_len == 0) {
             std::cout << "skipping zero length file: " << tmp_file.get_path() << std::endl;
             return false;
         }
 
-        auto new_len = map2.length();
 
         MMapIterator begin_in(map2, 0);
         MMapIterator end_in(map2, new_len);
@@ -625,6 +889,7 @@ void help() {
     puts("--silent           dont print any matches from search");
     puts("-n                 print file lines as if 'grep -n'");
     puts("-i                 ignore case, '-s abc' can match both 'abc' and 'ABC' and 'aBc'");
+    puts("--no-mmap          uses std::ifstream + ifstream_iterator (SLOW) instead of the mmap (windows/unix) api wrapper");
     puts("");
     puts("no arguments       this help text");
     puts("-h, --help         this help text");
@@ -737,10 +1002,12 @@ main(int argc, const char*argv[])
             ignore_case = true;
         } else if (strcmp(argv[i], "--silent") == 0) {
             silent = true;
+        } else if (strcmp(argv[i], "--no-mmap") == 0) {
+            use_mmap = false;
         }
     }
 
-    auto items_ = find_item(argc, argv, 1, {{"--dry-run", false}, {"--no-detach", false}, {"--print-all", false}, {"-n", false}, {"-i", false}, {"--silent", false}});
+    auto items_ = find_item(argc, argv, 1, {{"--dry-run", false}, {"--no-detach", false}, {"--print-all", false}, {"-n", false}, {"-i", false}, {"--silent", false}, {"--no-mmap", false}});
     auto items = find_item(argc, argv, 1, {{"-h", true}, {"--help", true}, {"-f", true}, {"--file", true}, {"-d", true}, {"--dir", true}, {"--directory", true}, {"-s", true}, {"--search", true}, {"-r", true}, {"--replace", true}});
     if (items.size() == 0) {
 
@@ -751,18 +1018,24 @@ main(int argc, const char*argv[])
         // we know argc == 3 or more
         // this means   prog arg1 arg2 ...
 
-        search_info.s.push_back(argv[2]);
-        if (argc == 4) {
-            search_info.r = argv[3];
-        }
+        {
+            search_info.search = unescape(argv[2], true, false);
 
+            if (search_info.search.length() == 0) {
+                std::cout << "skipping zero length search" << std::endl;
+                return 1;
+            }
+        }
+        if (argc == 4) {
+            search_info.r = unescape(argv[3], false, true);
+        }
         auto dir = argv[1];
         if (strcmp(dir, "--stdin") == 0) {
 
             std::cout << "using stdin as search area" << std::endl;
-            std::cout << "searching for:        " << search_info.s[0] << std::endl;
+            std::cout << "searching for:        " << escape(search_info.search) << std::endl;
             if (search_info.r.size() != 0) {
-                std::cout << "replacing with:       " << search_info.r << std::endl;
+                std::cout << "replacing with:       " << escape(search_info.r) << std::endl;
             }
 
             REOPEN_STDIN_AS_BINARY();
@@ -781,9 +1054,9 @@ main(int argc, const char*argv[])
             return invokeMMAP(tmp_file.get_path().c_str()) ? 0 : 1;
         } else {
             std::cout << "directory/file to search:  " << dir << std::endl;
-            std::cout << "searching for:        " << search_info.s[0] << std::endl;
+            std::cout << "searching for:        " << escape(search_info.search) << std::endl;
             if (search_info.r.size() != 0) {
-                std::cout << "replacing with:       " << search_info.r << std::endl;
+                std::cout << "replacing with:       " << escape(search_info.r) << std::endl;
             }
             return lsdir(dir) ? 0 : 1;
         }
@@ -842,36 +1115,38 @@ main(int argc, const char*argv[])
         }
 
         // collect search
-        std::vector<const char*> searches;
-        for (auto & p : items) {
-            if (p.second.first != nullptr) {
-                if (strcmp(p.second.first, "-s") == 0 || strcmp(p.second.first, "--search") == 0) {
-                    // this one is tricky, we can accept multiple items to search, but must stop at a flag
-                    bool end_search = false;
-                    for (int i = p.first+1; i < argc; i++) {
-                        for (auto & p1 : items) {
-                            if (p1.second.first != nullptr) {
-                                if (p1.first == i) {
-                                    end_search = true;
-                                    break;
+        {
+            bool first = true;
+            for (auto & p : items) {
+                if (p.second.first != nullptr) {
+                    if (strcmp(p.second.first, "-s") == 0 || strcmp(p.second.first, "--search") == 0) {
+                        // this one is a bit tricky, we can accept multiple items to search, but must stop at a flag
+                        bool end_search = false;
+                        for (int i = p.first+1; i < argc; i++) {
+                            for (auto & p1 : items) {
+                                if (p1.second.first != nullptr) {
+                                    if (p1.first == i) {
+                                        end_search = true;
+                                        break;
+                                    }
                                 }
                             }
+                            if (end_search) break;
+                            if (first) {
+                                first = false;
+                            } else {
+                                search_info.search += "|";
+                            }
+                            search_info.search += unescape(argv[i], true, false);
                         }
-                        if (end_search) break;
-                        searches.push_back(argv[i]);
                     }
                 }
             }
-        }
 
-        if (searches.size() == 0) {
-            std::cout << "no search items found" << std::endl;
-            return 1;
-        }
-
-
-        for (auto s : searches) {
-            search_info.s.push_back(s);
+            if (search_info.search.length() == 0) {
+                std::cout << "skipping zero length search" << std::endl;
+                return 1;
+            }
         }
 
         // collect replacement
@@ -885,10 +1160,15 @@ main(int argc, const char*argv[])
         }
 
         if (rep) {
-            search_info.r = rep;
+            search_info.r = unescape(rep, false, true);
         }
 
         bool m = false;
+
+        std::cout << "searching for:        " << escape(search_info.search) << std::endl;
+        if (search_info.r.size() != 0) {
+            std::cout << "replacing with:       " << escape(search_info.r) << std::endl;
+        }
 
         for (auto f : files) {
             std::cout << "file to search:  " << f << std::endl;

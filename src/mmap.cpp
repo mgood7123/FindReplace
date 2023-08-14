@@ -11,9 +11,9 @@ void MMapHelper::error(std::exception const& e) {
     open = false;
 }
 
-MMapHelper::MMapHelper() {}
+MMapHelper::MMapHelper() : page_size(mmaptwo::get_page_size()*400), api(mmaptwo::get_os() == mmaptwo::os_unix ? "mmap(2)" : mmaptwo::get_os() == mmaptwo::os_win32 ? "MapViewOfFile" : "(unknown api)") {}
 
-MMapHelper::MMapHelper(const char * path, char mode) {
+MMapHelper::MMapHelper(const char * path, char mode) : MMapHelper() {
     try {
         const char m[3] = {mode, 'e', '\0'};
         allocated_file = std::shared_ptr<MMapHelper::Map>(mmaptwo::open(path, m, 0, 0), [](auto p) { delete static_cast<MMapHelper::Map*>(p); });
@@ -23,7 +23,7 @@ MMapHelper::MMapHelper(const char * path, char mode) {
     }
 }
 
-MMapHelper::MMapHelper(const unsigned char * path, char mode) {
+MMapHelper::MMapHelper(const unsigned char * path, char mode) : MMapHelper() {
     try {
         const char m[3] = {mode, 'e', '\0'};
         allocated_file = std::shared_ptr<MMapHelper::Map>(mmaptwo::u8open(path, m, 0, 0), [](auto p) { delete static_cast<MMapHelper::Map*>(p); });
@@ -33,7 +33,7 @@ MMapHelper::MMapHelper(const unsigned char * path, char mode) {
     }
 }
 
-MMapHelper::MMapHelper(const wchar_t * path, char mode) {
+MMapHelper::MMapHelper(const wchar_t * path, char mode) : MMapHelper() {
     try {
         const char m[3] = {mode, 'e', '\0'};
         allocated_file = std::shared_ptr<MMapHelper::Map>(mmaptwo::wopen(path, m, 0, 0), [](auto p) { delete static_cast<MMapHelper::Map*>(p); });
@@ -47,12 +47,11 @@ bool MMapHelper::operator==(const MMapHelper & other) const { return allocated_f
 bool MMapHelper::operator!=(const MMapHelper & other) const { return !(*this == other); }
 
 const char * MMapHelper::get_api() const {
-    int os = mmaptwo::get_os();
-    return os == mmaptwo::os_unix ? "mmap(2)" : os == mmaptwo::os_win32 ? "MapViewOfFile" : "(unknown api)";
+    return api;
 }
 
 size_t MMapHelper::get_page_size() const {
-    return mmaptwo::get_page_size();
+    return page_size;
 }
 
 std::shared_ptr<MMapHelper::Page> MMapHelper::obtain_map(size_t offset, size_t size) const {

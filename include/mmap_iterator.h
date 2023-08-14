@@ -8,11 +8,11 @@
 #define SATISFIES__MOVE_ASSIGNABLE(C) C & operator=(C && other);
 
 #define SATISFIES__COPY_CONSTRUCTIBLE(C); \
-    SATISFIES__MOVE_CONSTRUCTIBLE(MMapIterator); \
+    SATISFIES__MOVE_CONSTRUCTIBLE(C); \
     C(const C & other);
 
 #define SATISFIES__COPY_ASSIGNABLE(C) \
-    SATISFIES__MOVE_ASSIGNABLE(MMapIterator); \
+    SATISFIES__MOVE_ASSIGNABLE(C); \
     C & operator=(const C & other);
 
 #define SATISFIES__DESTRUCTIBLE(C) virtual ~C();
@@ -51,6 +51,8 @@ struct MMapIterator {
     MMapHelper * map = nullptr;
     
     mutable std::shared_ptr<MMapHelper::Page> current_page;
+    std::size_t page_size;
+    const char * api;
 
     public:
     using iterator_category = std::bidirectional_iterator_tag;

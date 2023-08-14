@@ -17,6 +17,8 @@ class MMapHelper {
     std::shared_ptr<MMapHelper::Map> allocated_file;
     bool open = false;
     bool zero_size = false;
+    std::size_t page_size;
+    const char * api;
 
     void error(std::exception const& e);
 
