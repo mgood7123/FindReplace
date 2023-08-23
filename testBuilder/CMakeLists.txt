@@ -70,6 +70,26 @@ macro(testBuilder_build testName outDirectory)
     )
 endmacro()
 
+macro(testBuilder_build_static_library testName)
+    add_library(${testName} STATIC ${testBuilder_SOURCES_LIST_${testName}})
+    
+    if (testBuilder_INCLUDE_LIST_${testName})
+        target_include_directories(${testName} PUBLIC ${testBuilder_INCLUDE_LIST_${testName}})
+    endif()
+    
+    if (testBuilder_DEPENDENCY_LIST_${testName})
+        add_dependencies(${testName} ${testBuilder_DEPENDENCY_LIST_${testName}})
+    endif()
+
+    if (testBuilder_COMPILE_OPTIONS_${testName})
+        target_compile_options(${testName} PUBLIC ${testBuilder_COMPILE_OPTIONS_${testName}})
+    endif()
+    
+    if (testBuilder_LIBRARIES_LIST_${testName})
+        target_link_libraries(${testName} ${testBuilder_LIBRARIES_LIST_${testName}})
+    endif()
+endmacro()
+
 macro(testBuilder_build_shared_library testName)
     add_library(${testName} SHARED ${testBuilder_SOURCES_LIST_${testName}})
     
