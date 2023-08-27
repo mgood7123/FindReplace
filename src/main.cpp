@@ -192,6 +192,7 @@ struct SearchInfo {
     std::vector<std::string> s;
     std::string search;
     std::string r;
+    bool searching = true;
 } search_info;
 
 #include <regex>
@@ -549,12 +550,10 @@ struct RegexSearcherWithLineInfo : public RegexMatcherWithLineInfo<BiDirIt> {
 };
 
 bool invokeMMAP(const char * path) {
-    bool is_searching = search_info.r.size() == 0;
-
     auto regex_flags = std::regex::ECMAScript | std::regex::optimize;
     if (ignore_case) regex_flags |= std::regex::icase;
 
-    if (is_searching) {
+    if (search_info.searching) {
 
         if (use_mmap) {
             MMapHelper map(path, 'r');
@@ -563,6 +562,11 @@ bool invokeMMAP(const char * path) {
 
             if (map.is_open() && map_len == 0) {
                 std::cout << "skipping zero length file: " << path << std::endl;
+                return false;
+            }
+
+            if (!map.is_open()) {
+                std::cout << "failed to open file: " << path << std::endl;
                 return false;
             }
 
@@ -617,6 +621,11 @@ bool invokeMMAP(const char * path) {
 
             if (map.is_open() && old_len == 0) {
                 std::cout << "skipping zero length file: " << path << std::endl;
+                return false;
+            }
+
+            if (!map.is_open()) {
+                std::cout << "failed to open file: " << path << std::endl;
                 return false;
             }
 
@@ -715,6 +724,10 @@ bool invokeMMAP(const char * path) {
             return false;
         }
 
+        if (!map2.is_open()) {
+            std::cout << "failed to open file: " << tmp_file.get_path() << std::endl;
+            return false;
+        }
 
         MMapIterator begin_in(map2, 0);
         MMapIterator end_in(map2, new_len);
@@ -746,7 +759,7 @@ bool invokeMMAP(const char * path) {
                 return false;
             }
 
-            if (!SetFilePointerEx(handle, (old_len - new_len)+1, NULL, FILE_BEGIN)) {
+            if (!SetFilePointerEx(handle, (new_len-(old_len - new_len))+2, NULL, FILE_BEGIN)) {
                 std::cout << "failed to set file pointer of truncate file: " << path << std::endl;
                 return false;
             }
@@ -758,7 +771,7 @@ bool invokeMMAP(const char * path) {
 
             CloseHandle(handle);
 #else
-            while (truncate(path, (old_len - new_len)+1) == -1) {
+            while (truncate(path, (new_len-(old_len - new_len))+2) == -1) {
                 if (errno == EINTR) continue;
                 std::cout << "failed to truncate file: " << path << std::endl;
                 return false;
@@ -835,14 +848,13 @@ void toOutStream(std::istream * inHandle, std::ostream * outHandle, unsigned int
     std::cout << "copied file to out stream" << std::endl;
 }
 
-bool lsdir(const std::string & path)
+void invoke_dir(const std::string & path)
 {
-    bool m = false;
     cppfs::FileHandle handle = cppfs::fs::open(path);
 
     if (!handle.exists()) {
         std::cout << "item does not exist:  " << path << std::endl;
-        return false;
+        return;
     }
 
     if (handle.isDirectory())
@@ -850,16 +862,14 @@ bool lsdir(const std::string & path)
         // std::cout << "entering directory:  " << path << std::endl;
         for (cppfs::FileIterator it = handle.begin(); it != handle.end(); ++it)
         {
-            lsdir(path + "/" + *it);
+            invoke_dir(path + "/" + *it);
         }
         // std::cout << "leaving directory:  " << path << std::endl;
     } else if (handle.isFile()) {
-        bool r = invokeMMAP(path.c_str());
-        if (!m) m = r;
+        invokeMMAP(path.c_str());
     } else {
         std::cout << "unknown type:  " << path << std::endl;
     }
-    return m;
 }
 
 #ifdef _WIN32
@@ -1023,7 +1033,7 @@ main(int argc, const char*argv[])
 
             if (search_info.search.length() == 0) {
                 std::cout << "skipping zero length search" << std::endl;
-                return 1;
+                return 0;
             }
         }
         if (argc == 4) {
@@ -1051,14 +1061,14 @@ main(int argc, const char*argv[])
             std__in__file.flush();
             std__in__file.close();
 
-            return invokeMMAP(tmp_file.get_path().c_str()) ? 0 : 1;
+            invokeMMAP(tmp_file.get_path().c_str()) ? 0 : 1;
         } else {
             std::cout << "directory/file to search:  " << dir << std::endl;
             std::cout << "searching for:        " << escape(search_info.search) << std::endl;
             if (search_info.r.size() != 0) {
                 std::cout << "replacing with:       " << escape(search_info.r) << std::endl;
             }
-            return lsdir(dir) ? 0 : 1;
+            invoke_dir(dir);
         }
     } else {
         // we have flags
@@ -1145,7 +1155,7 @@ main(int argc, const char*argv[])
 
             if (search_info.search.length() == 0) {
                 std::cout << "skipping zero length search" << std::endl;
-                return 1;
+                return 0;
             }
         }
 
@@ -1161,9 +1171,10 @@ main(int argc, const char*argv[])
 
         if (rep) {
             search_info.r = unescape(rep, false, true);
+            search_info.searching = false;
+        } else {
+            search_info.searching = true;
         }
-
-        bool m = false;
 
         std::cout << "searching for:        " << escape(search_info.search) << std::endl;
         if (search_info.r.size() != 0) {
@@ -1172,13 +1183,11 @@ main(int argc, const char*argv[])
 
         for (auto f : files) {
             std::cout << "file to search:  " << f << std::endl;
-            bool r = lsdir(f);
-            if (!m) m = r;
+            invoke_dir(f);
         }
         for (auto d : directories) {
             std::cout << "directory to search:  " << d << std::endl;
-            bool r = lsdir(d);
-            if (!m) m = r;
+            invoke_dir(d);
         }
 
         if (is_stdin) {
@@ -1198,9 +1207,8 @@ main(int argc, const char*argv[])
             std__in__file.flush();
             std__in__file.close();
 
-            bool r = invokeMMAP(tmp_file.get_path().c_str());
-            if (!m) m = r;
+            invokeMMAP(tmp_file.get_path().c_str());
         }
-        return m ? 0 : 1;
     }
+    return 0;
 }
